@@ -1,0 +1,249 @@
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse) 
+library(lubridate) 
+library(knitr)
+library(lmerTest)
+```
+
+## Introduction
+
+This report analyzes the simulated data on book sales in 2019 <https://query.data.world/s/3jk3izpnbj6n5fyrcs4jcghzdwxo2p>. The online bookstore implemented some program on July 1, 2019 in order to increase the sales. The purpose of the project is to define if the program was effective or not.
+
+## Pre-processing the data
+
+First, I uploaded the csv file and looked how it's organized:
+
+
+```{r reading the file, echo=TRUE, results='markup'}
+df <- read.csv("https://query.data.world/s/3jk3izpnbj6n5fyrcs4jcghzdwxo2p", header=TRUE, stringsAsFactors=FALSE)
+
+glimpse(df)
+```
+Each row is an order of a single book. There are columns for dates, book titles, total purchased books in an order, reviews submitted by a customer (in string format), and customer types. 
+
+Next, I cleaned the data: I deleted all the NAs from the column with reviews. I am going to ignore this data.
+
+```{r NA deletion, echo=TRUE}
+df_clean<- df %>% filter(is.na(user_submitted_review)!=TRUE)
+```
+
+For the column `df_clean$total_purchased` I replaced all the NAs with the mean value of this column:
+
+```{r echo=TRUE}
+df_without_na_purchases <- df_clean %>% filter(is.na(total_purchased) !=TRUE)
+mean_books_purchased_in_an_order <- round(mean(df_without_na_purchases$total_purchased), digits=0)
+df_clean <- df_clean %>% mutate(new_total_purchased = ifelse(is.na(total_purchased)==TRUE, mean_books_purchased_in_an_order, total_purchased))
+
+```
+
+After that, I split all the reviews into three classes: `Positive`, `Negative`, and `Neutral`. In order to do that, I first looked at the unique values of the `df_clean$user_submitted_review` column and saved them as a vector:
+
+```{r echo=TRUE, results='markup'}
+unique_reviews <- unique(df_clean$user_submitted_review)
+unique_reviews
+```
+
+And I implemented a basic sentiment extraction:
+
+```{r echo=TRUE}
+positive_or_not <- function(review) {
+  case_when(str_detect(review, "not recommend") ~ "Negative",
+    str_detect(review, "Awesome") ~ "Positive",
+    str_detect(review, "OK") ~ "Neutral",
+    str_detect(review, "okay") ~ "Neutral",
+    str_detect(review, "Never read a better book") ~ "Positive",
+    str_detect(review, "learned a lot") ~ "Positive",
+    str_detect(review, "not needed") ~ "Negative",
+    str_detect(review, "other books were better") ~ "Negative",
+    str_detect(review, "Hated") ~ "Negative",
+    TRUE ~ as.character(review))}
+
+df_clean <- df_clean %>% mutate(review = positive_or_not(user_submitted_review))
+
+```
+
+The last thing I did before proceeding to the actual analysis is reformatting `df_clean$date` and adding the column indicating if the program was active at this date:
+
+```{r echo=TRUE}
+df_clean$date <- mdy(df_clean$date)
+
+df_clean <- df_clean %>% mutate(`New Program Active` = ifelse(date < ymd("2019-07-01"), "No", "Yes"))
+```
+
+## Analysis
+
+First, I checked if there seems to be improvement just looking at absolute values:
+
+```{r echo=TRUE, results='markup'}
+sales_before_and_after <- df_clean %>% group_by(`New Program Active`) %>% summarise(`Books sold` = sum(new_total_purchased))
+sales_before_and_after
+
+```
+
+### Customer type and program activation
+
+I checked if the program improved the sales for a certain customer type. 
+
+```{r echo=TRUE}
+df_business <- df_clean %>% filter(customer_type == "Business")
+
+df_individual <- df_clean %>% filter(customer_type == "Individual")
+
+sales_business <- df_business %>% group_by(`New Program Active`) %>% summarise(`Books sold` = sum(new_total_purchased)) %>% mutate(`Customer type` = "Business")
+
+sales_individual <- df_individual %>% group_by(`New Program Active`) %>% summarise(`Books sold` = sum(new_total_purchased)) %>% mutate(`Customer type` = "Individual")
+
+sales_customer_type <- rbind(sales_business, sales_individual)
+
+```
+
+As we see, there doesn't seem to be much improvement: 
+
+```{r echo=FALSE, results = 'markup'}
+sales_customer_type %>% arrange(`New Program Active`, by_group = TRUE)
+sales_customer_type %>% ggplot(aes(x=`Customer type`, y = `Books sold`, fill = `New Program Active`)) + geom_bar(stat="identity", position = 'dodge')
+```
+
+A Chi-square test shows that there is no significant dependency between the type of the customer and the results of the program activation (p > 0.05):
+
+```{r echo=FALSE, results='markup'}
+tbl <- rbind(sales_individual$`Books sold`, sales_business$`Books sold`)
+colnames(tbl) <- c("Program not active", "Program Active")
+rownames(tbl) <- c("Individual", "Business")
+tbl
+chisq.test(tbl)
+```
+
+A linear mixed-effects model shows that the program was inefficient (p = 0.937): 
+
+### Reviews and program activation
+
+Then I looked into the dependency between the review level and the program activation. 
+
+```{r echo=TRUE}
+df_positive <- df_clean %>% filter(review == "Positive")
+
+df_negative <- df_clean %>% filter(review == "Negative")
+
+df_neutral <- df_clean %>% filter(review == "Neutral")
+
+
+sales_positive <- df_positive %>% group_by(`New Program Active`) %>% summarise(`Books sold` = sum(new_total_purchased)) %>% mutate(Review = "Positive")
+
+sales_negative <- df_negative %>% group_by(`New Program Active`) %>% summarise(`Books sold` = sum(new_total_purchased)) %>% mutate(Review = "Negative")
+
+sales_neutral <- df_neutral %>% group_by(`New Program Active`) %>% summarise(`Books sold` = sum(new_total_purchased)) %>% mutate(Review = "Neutral")
+
+sales_reviews<- rbind(sales_positive, sales_negative, sales_neutral)
+```
+
+The results seem a bit more controversial: 
+
+```{r echo=FALSE}
+sales_reviews
+plot_sales_by_reviews <- sales_reviews %>% ggplot(aes(x=Review, y = `Books sold`, fill= `New Program Active`)) + geom_bar(stat="identity", position = "dodge")
+plot_sales_by_reviews
+```
+
+A Chi-square test shows that the type of the review correlates with the effects of the program activation, although this correlation is relatively weak (p = 0.011):
+
+```{r echo=FALSE, results='markup'}
+tbl1 <- matrix(sales_reviews$`Books sold`, byrow = TRUE, nrow=3, ncol=2)
+
+colnames(tbl1) <- c("Program not active", "Program Active")
+rownames(tbl1) <- c("Positive", "Negative", "Neutral")
+tbl1
+chisq.test(tbl1)
+```
+
+Since I classified reviews containing the words like "okay", it makes sense to check if classifiying them as `Positive` makes any difference: 
+
+```{r echo=FALSE, results='markup'}
+positive_and_neutral <- tbl1[1,] +tbl1[3,]
+tbl2 <- rbind(tbl1, positive_and_neutral)
+tbl2 <- tbl2[c(2,4),]
+rownames(tbl2) <- c("Negative", "Positive (incl. Neutral)")
+tbl2
+sales_reviews <- sales_reviews %>% mutate(`Review_2` = ifelse((Review == "Positive" | Review == "Neutral"), "Positive (incl. Neutral)", "Negative")) %>% mutate(Sum = c(2605+1923, 2716+1767, 3678, 3711, 2605+1923, 2716+1767))
+
+sales_reviews_binary <- sales_reviews[1:4,c("New Program Active", "Review_2", "Sum")]
+
+colnames(sales_reviews_binary) <-c("New Program Active", "Review", "Books Sold")
+
+plot_reviews_2 <- sales_reviews_binary %>% ggplot(aes(x=Review, y=`Books Sold`, fill = `New Program Active`)) + geom_bar(stat = "identity", position="dodge")
+
+plot_reviews_2
+```
+
+In this case the distributions are even more similar. A Chi-square test shows that the review doesn't have a significant effect:
+
+```{r echo=FALSE, results='markup'}
+chisq.test(tbl2)
+```
+
+```{r echo=TRUE, results='markup'}
+model_reviews <- lmer(`Books sold` ~ `New Program Active` + (1|Review), data = sales_reviews)
+summary(model_reviews)
+```
+
+### Book title and program activation
+
+There are only six unique book titles in the dataset: 
+
+```{r echo=FALSE, results='markup'}
+unique(df$title)
+```
+
+We can look if the program was good for a particular book.
+
+```{r echo=FALSE, results='markup'}
+book_titles <- unique(df_clean$title)
+
+sales_book1 <- df_clean %>% filter(title == book_titles[1])
+
+sales_book2 <- df_clean %>% filter(title == book_titles[2])
+
+sales_book3 <- df_clean %>% filter(title == book_titles[3])
+
+sales_book4 <- df_clean %>% filter(title == book_titles[4])
+
+sales_book5 <- df_clean %>% filter(title == book_titles[5])
+
+sales_book6 <- df_clean %>% filter(title == book_titles[6])
+
+summarizing <- function(d, booktitle) {
+  booktitle = d$title[1]
+  d <- d %>% group_by(`New Program Active`) %>% summarise(`Books sold` = sum(new_total_purchased)) %>% mutate(Book = booktitle)
+}
+
+book1 <- summarizing(sales_book1)
+book2 <- summarizing(sales_book2)
+book3 <- summarizing(sales_book3)
+book4 <- summarizing(sales_book4)
+book5 <- summarizing(sales_book5)
+book6 <- summarizing(sales_book6)
+
+sales_books <- rbind(book1, book2, book3, book4, book5, book6)
+
+plot_books <- sales_books %>% ggplot(aes(x=`Book`, y = `Books sold`, fill = `New Program Active`)) + geom_bar(stat = "identity", position = "dodge") +scale_x_discrete(guide = guide_axis(angle=60))
+
+plot_books
+
+```
+
+The data seems controversial. I ran a mixed-effects linear model that has `New Program Active` as a fixed effect and `Book` as a random effect: 
+
+```{r echo=TRUE}
+model_books <- lmer(`Books sold` ~ `New Program Active` +(1|Book), data = sales_books)
+summary(model_books)
+```
+
+The effect of the program activation is statistically non-significant and negative (beta = -7.00, p=0.931). In this way, the program can be considered not efficient. 
+
+## Conclusion
+
+In this way, the introduction of this program did not increase the sales. This is a safe conclusion even if we take into account such random factors as reviews, customer types, or particular books. 
+
